@@ -6,11 +6,11 @@
 --------------------------------------------------------------------------------
 WITH marginfi_borrows AS (
   SELECT 
-    a.BLOCK_TIMESTAMP,  -- Borrow time, used for hourly price matching
+    DATE_TRUNC('hour',a.BLOCK_TIMESTAMP) as borrow_time,  -- Borrow time, used for hourly price matching
     a.decoded_instruction:"args":"amount"::FLOAT AS raw_amount,  -- Borrowed amount (not normalized by decimals)
     acc.value:"pubkey"::STRING AS account_address  -- Token ATA from which the user receives the loan (destinationTokenAccount)
-  FROM solana.core.fact_decoded_instructions a, 
-       LATERAL FLATTEN(input => a.decoded_instruction:"accounts") AS acc  -- Flatten account list from decoded instruction
+  FROM solana.core.fact_decoded_instructions a,
+  LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc -- Flatten account list from decoded instruction
   WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'  -- MarginFi V2 Program ID
     AND a.event_type = 'lendingAccountBorrow'  -- Borrow event type
     AND acc.value:"name"::STRING = 'destinationTokenAccount'  -- Account name must be destinationTokenAccount
@@ -24,11 +24,17 @@ WITH marginfi_borrows AS (
 -- Note: Token accounts (ATA) are linked to their mint addresses for metadata lookup
 --------------------------------------------------------------------------------
 token_info AS (
-  SELECT 
+  SELECT distinct
     account_address,  -- Token account (SPL ATA)
     mint              -- Associated token mint (unique identifier)
-  FROM solana.core.fact_token_balances 
+  FROM solana.core.fact_token_balances tf
+WHERE EXISTS (
+  SELECT 1 
+  FROM marginfi_borrows mb
+  WHERE mb.account_address = tf.account_address
+)
 ),
+
 --------------------------------------------------------------------------------
 -- 3. Build asset metadata: get symbol and decimals for each token
 -- Priority:
@@ -84,9 +90,10 @@ hp_main_prices AS (
     price,                   
     hour                       -- Hourly timestamp used to match borrow event timing
   FROM solana.price.ez_prices_hourly
+  WHERE hour >= CURRENT_DATE - INTERVAL '30 days'
 ),
 
-② Backup price source (OHLC closing price)
+-- ② Backup price source (OHLC closing price)
 -- Source: “close” field from “fact_prices_ohlc_hourly” table
 -- Used as a fallback when the main price source is missing
 hp_backup_prices AS (
@@ -97,6 +104,7 @@ hp_backup_prices AS (
   FROM solana.price.fact_prices_ohlc_hourly f
   JOIN solana.price.dim_asset_metadata dm 
     ON f.asset_id = dm.asset_id -- join on “asset_id” as the primary key
+    WHERE hour >= CURRENT_DATE - INTERVAL '30 days'
 ),
 -- ③ Merge primary and backup price sources
 -- Prefer the primary price; fallback to backup price if primary is missing
@@ -133,7 +141,7 @@ borrow_volume AS (
     ON ti.mint = am.token_address                          -- Retrieve the token's symbol and decimals information
   LEFT JOIN hp_final_prices hp
     ON am.token_address = hp.token_address
-    AND hp.hour = DATE_TRUNC('hour', mb.BLOCK_TIMESTAMP)   --  Precisely match the hourly price corresponding to the borrow timestamp
+    AND hp.hour = mb.borrow_time   --  Precisely match the hourly price corresponding to the borrow timestamp
   GROUP BY ti.mint              -- Group and aggregate by token
 )
 --------------------------------------------------------------------------------
