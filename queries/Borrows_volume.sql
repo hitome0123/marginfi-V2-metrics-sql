@@ -133,14 +133,14 @@ borrow_volume AS (
     ON ti.mint = am.token_address                          -- Retrieve the token's symbol and decimals information
   LEFT JOIN hp_final_prices hp
     ON am.token_address = hp.token_address
-    AND hp.hour = DATE_TRUNC('hour', mb.BLOCK_TIMESTAMP)   -- 精确匹配“借款时间”的小时级别价格
-  GROUP BY ti.mint, am.symbol, am.decimals                 -- 按 token 分组汇总
+    AND hp.hour = DATE_TRUNC('hour', mb.BLOCK_TIMESTAMP)   --  Precisely match the hourly price corresponding to the borrow timestamp
+  GROUP BY ti.mint              -- Group and aggregate by token
 )
 --------------------------------------------------------------------------------
--- 6. Borrow Volume 汇总
+-- 6. Borrow Volume Summary
 --------------------------------------------------------------------------------
 
 SELECT
   'borrow_volume_usd' AS metric,
-  SUM(borrow_volume_usd) AS value
+  SUM(borrow_volume_usd) AS value 
 FROM borrow_volume;
