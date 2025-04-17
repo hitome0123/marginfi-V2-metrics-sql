@@ -138,7 +138,7 @@ borrow_volume AS (
   INNER JOIN token_info ti
     ON mb.account_address = ti.account_address             -- Map the token ATA to its corresponding mint address
   INNER JOIN asset_metadata am
-    ON ti.mint = am.token_address                          -- Retrieve the token's symbol and decimals information
+    ON ti.mint = am.token_address                          -- Retrieve the token's decimals information
   LEFT JOIN hp_final_prices hp
     ON am.token_address = hp.token_address
     AND hp.hour = mb.borrow_time   --  Precisely match the hourly price corresponding to the borrow timestamp
