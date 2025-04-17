@@ -287,11 +287,15 @@ outstanding_volume AS (
   GROUP BY ti.mint, am.symbol, am.decimals             -- 按 token 聚合结果
 )
 
--- Borrow Volume 汇总
+-- 汇总
 SELECT
-  SUM(borrow_volume_usd) AS borrow_volume_usd
-FROM borrow_volume 
-UNION ALL SELECT
-  SUM(outstanding_volume_usd) AS outstanding_volume_usd
+  'borrow_volume_usd' AS metric,
+  SUM(borrow_volume_usd) AS value
+FROM borrow_volume
+UNION ALL
+SELECT
+  'outstanding_volume_usd' AS metric,
+  SUM(outstanding_volume_usd) AS value
 FROM outstanding_volume;
+
 
