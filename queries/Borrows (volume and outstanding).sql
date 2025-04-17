@@ -290,10 +290,8 @@ outstanding_volume AS (
 -- Borrow Volume 汇总
 SELECT
   SUM(borrow_volume_usd) AS borrow_volume_usd
-FROM borrow_volume;
-
--- Outstanding Volume 汇总
-SELECT
+FROM borrow_volume 
+UNION ALL SELECT
   SUM(outstanding_volume_usd) AS outstanding_volume_usd
 FROM outstanding_volume;
 
