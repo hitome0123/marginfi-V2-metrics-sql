@@ -87,7 +87,7 @@ transfer_actions AS (
   LEFT JOIN solana.core.fact_transfers t 
     ON vo.tx_id = t.tx_id     -- Join on transaction ID to match vault event and corresponding transfer
   WHERE t.amount > 0          -- Ensure only real, positive-value transfers are considered
-)
+),
 --------------------------------------------------------------------------------
 -- 4. Fetch hourly historical token prices for Borrow Volume calculation
 -- Price sources:
@@ -152,7 +152,7 @@ SELECT
   hp.price,                -- Hourly token price in USD
   (ta.amount * hp.price) AS revenue_amount_usd  -- Revenue in USD = token amount × hourly price
 FROM transfer_actions ta
-LEFT JOIN historical_prices hp
+LEFT JOIN hp_final_prices hp
   ON ta.mint = hp.token_address           -- Join on token mint address
   AND hp.hour = DATE_TRUNC('hour', ta.transfer_time)  -- Match price by exact hour of transfer
 WHERE ta.revenue_type IN ('Protocol Fees', 'Liquidation Revenue')  -- Only include relevant revenue types
