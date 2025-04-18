@@ -132,16 +132,16 @@ deposit_volume AS (
     SUM(COALESCE(da.deposit_raw_amount, 0)) AS deposit_raw_amount, 
    -- Total deposit volume (USD) = Each deposit amount × corresponding hourly price, then aggregated
    SUM(
-      (COALESCE(da.deposit_raw_amount, 0) / POWER(10, COALESCE(am.decimals, 0)))  -- Convert raw token amount to standardized unit using its decimals
-      * COALESCE(hp.price, 0)                                             -- Use the corresponding hourly price; fallback to 0 if the price is missing
+      (COALESCE(da.deposit_raw_amount, 0) / POWER(10, COALESCE(am.decimals, 0))) -- Convert raw token amount to standardized unit using its decimals
+      * COALESCE(hp.price, 0)     -- Use the corresponding hourly price; fallback to 0 if the price is missing
     ) AS deposit_volume_usd
   FROM deposit_actions da
-  INNER JOIN token_info ti ON da.deposit_token_address = ti.account_address
-  LEFT JOIN asset_metadata am ON ti.mint = am.token_address
+  INNER JOIN token_info ti ON da.deposit_token_address = ti.account_address -- Map the token ATA to its corresponding mint address
+  LEFT JOIN asset_metadata am ON ti.mint = am.token_address  -- Retrieve the token's decimals information 
   LEFT JOIN hp_final_prices hp
-    ON am.token_address = hp.token_address
-    AND hp.hour = DATE_TRUNC('hour', da.BLOCK_TIMESTAMP)
-  GROUP BY ti.mint, am.symbol, am.decimals
+    ON am.token_address = hp.token_address 
+    AND hp.hour = DATE_TRUNC('hour', da.BLOCK_TIMESTAMP) -- Precisely match the hourly price corresponding to the borrow timestamp
+  GROUP BY ti.mint, am.symbol
 )
 --------------------------------------------------------------------------------
 -- 6. Deposit Volume Summary
