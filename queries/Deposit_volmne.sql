@@ -2,8 +2,7 @@
 -- 1. Extract Deposit actions related to BankLiquidityVault for computing deposit volume
 -- Source: solana.core.fact_decoded_instructions
 -- Note: This query takes a "protocol-level" perspective. The 'bankLiquidityVault'
---       account reflects the protocol's asset inflow, which can be used to measure
---       user deposits into MarginFi.
+-- account reflects the protocol's asset inflow, which can be used to measure user deposits into MarginFi.
 --------------------------------------------------------------------------------
 WITH deposit_actions AS (
   SELECT DISTINCT
@@ -139,7 +138,7 @@ deposit_volume AS (
   FROM deposit_actions da
   INNER JOIN token_info ti ON da.deposit_token_address = ti.account_address
   LEFT JOIN asset_metadata am ON ti.mint = am.token_address
-  LEFT JOIN historical_prices hp
+  LEFT JOIN hp_final_prices hp
     ON am.token_address = hp.token_address
     AND hp.hour = DATE_TRUNC('hour', da.BLOCK_TIMESTAMP)
   GROUP BY ti.mint, am.symbol, am.decimals
