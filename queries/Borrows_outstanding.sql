@@ -6,8 +6,8 @@
 --------------------------------------------------------------------------------
 WITH borrow_actions AS (
 SELECT distinct
-    a.event_type,  -- 事件类型：仅限 lendingAccountBorrow，用于后续筛选事件计算
-    a.decoded_instruction:"args":"amount"::FLOAT AS borrow_raw_amount,  -- 借款金额（未归一化）
+    a.event_type,  -- Event type: only lendingAccountBorrow, used to filter relevant events
+    a.decoded_instruction:"args":"amount"::FLOAT AS borrow_raw_amount,  -- Borrow amount (not normalized)
     acc.value:"pubkey"::STRING AS borrow_token_address -- Internal protocol account for borrowing asset outflow (BankLiquidityVault)
   FROM solana.core.fact_decoded_instructions a,
        LATERAL FLATTEN(input => a.decoded_instruction:"accounts") AS acc -- Flatten accounts to extract bankLiquidityVault
@@ -119,11 +119,11 @@ asset_metadata AS (
 -- Source: mainstream on-chain price table “ez_prices_hourly”
 lp_main_prices AS (
   SELECT 
-    token_address,     -- Token 地址
-    price              -- 最新价格（USD）
+    token_address,     
+    price              
   FROM solana.price.ez_prices_hourly
   WHERE blockchain = 'solana'
-    AND hour = (  -- 仅取最新一小时
+    AND hour = (  -- Only select the most recent hour
       SELECT MAX(hour) 
       FROM solana.price.ez_prices_hourly 
       WHERE blockchain = 'solana'
@@ -135,13 +135,13 @@ lp_main_prices AS (
 -- Used as a fallback when the main price source is missing
 lp_backup_prices AS (
   SELECT 
-    dm.token_address,  -- Token 地址（来自维度表）
-    f.close AS price   -- 收盘价 close 字段
+    dm.token_address,  
+    f.close AS price   -- Fallback price: use OHLC close as hourly consensus price
   FROM solana.price.fact_prices_ohlc_hourly f
   INNER JOIN solana.price.dim_asset_metadata dm 
     ON f.asset_id = dm.asset_id
   WHERE dm.blockchain = 'solana'
-    AND f.hour = (  -- 同样只取最新小时
+    AND f.hour = (  -- Same as above: fetch only the most recent hourly data
       SELECT MAX(hour) 
       FROM solana.price.fact_prices_ohlc_hourly
     )
@@ -151,8 +151,8 @@ lp_backup_prices AS (
 -- Prefer the primary price; fallback to backup price if primary is missing
 lp_final_prices AS (
   SELECT 
-    COALESCE(lm.token_address, lb.token_address) AS token_address,  -- 优先使用主价格中的 token 地址
-    COALESCE(lm.price, lb.price) AS price                           -- 优先使用主价格；若缺失则使用备份价格
+    COALESCE(lm.token_address, lb.token_address) AS token_address,  -- Prefer token address from the primary price source
+    COALESCE(lm.price, lb.price) AS price                           -- Fallback to backup price if missing
   FROM lp_main_prices lm  
   LEFT JOIN lp_backup_prices lb
     ON lm.token_address = lb.token_address
