@@ -96,11 +96,9 @@ lp_main_prices AS (
     token_address,     
     price              
   FROM solana.price.ez_prices_hourly
-  WHERE blockchain = 'solana'
     AND hour = (  -- Only select the most recent hour
       SELECT MAX(hour) 
       FROM solana.price.ez_prices_hourly 
-      WHERE blockchain = 'solana'
     )
 ),
 
@@ -132,7 +130,7 @@ lp_final_prices AS (
     ON lm.token_address = lb.token_address
 ),
 --------------------------------------------------------------------------------
--- 5. Compute Token-Level Net Deposits (TVL Core Calculation)
+-- 7. Compute Token-Level Net Deposits (TVL Core Calculation)
 -- Source:
 --   - marginfi_actions: decoded deposit and withdrawal events (user token account level)
 --   - token_info: to map token account to mint
@@ -184,7 +182,7 @@ TVL AS (
 )
 
 --------------------------------------------------------------------------------
--- 6. Total Value Locked  Summary
+-- 8. Total Value Locked  Summary
 --------------------------------------------------------------------------------
 SELECT
   'TVL' AS metric,
