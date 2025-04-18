@@ -3,12 +3,17 @@
 -- Source: solana.core.fact_decoded_instructions
 -- This part identifies the "feeVault" account involved in the
 -- 'lendingPoolCollectBankFees' events as defined in MarginFi protocol
+-- 'lendingPoolCollectBankFees' indicates the transaction where protocol fees are collected from the bank's liquidity vault
 --------------------------------------------------------------------------------
 WITH vault_addresses AS (
   SELECT 
     a.block_timestamp,  -- Timestamp of the fee collection event
-    a.tx_id,
-    MAX(CASE WHEN acc.value:"name"::STRING = 'feeVault' THEN acc.value:"pubkey"::STRING END) AS fee_vault_address
+    a.tx_id,            -- Transaction ID of the instruction
+    -- Extract feeVault address (only one per instruction)
+   MAX(CASE 
+      WHEN acc.value:"name"::STRING = 'feeVault' 
+      THEN acc.value:"pubkey"::STRING 
+    END) AS fee_vault_address  --  Use MAX(CASE...) to pick the correct pubkey after flattening
   FROM solana.core.fact_decoded_instructions a,
        LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
   WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
