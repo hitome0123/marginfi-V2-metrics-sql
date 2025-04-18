@@ -16,7 +16,7 @@ WITH vault_addresses AS (
     END) AS fee_vault_address  --  Use MAX(CASE...) to pick the correct pubkey after flattening
   FROM solana.core.fact_decoded_instructions a,
        LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
-  WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
+  WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'  -- MarginFi V2 Program ID
     AND a.event_type = 'lendingPoolCollectBankFees'
   GROUP BY a.block_timestamp, a.tx_id
 ),
