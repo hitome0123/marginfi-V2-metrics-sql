@@ -130,7 +130,7 @@ lp_final_prices AS (
     ON lm.token_address = lb.token_address
 ),
 --------------------------------------------------------------------------------
--- 7. Compute Token-Level Net Deposits (TVL Core Calculation)
+-- 5. Compute Token-Level Net Deposits (TVL Core Calculation)
 -- Source:
 --   - marginfi_actions: decoded deposit and withdrawal events (user token account level)
 --   - token_info: to map token account to mint
@@ -182,7 +182,7 @@ TVL AS (
 )
 
 --------------------------------------------------------------------------------
--- 8. Total Value Locked  Summary
+-- 6. Total Value Locked  Summary
 --------------------------------------------------------------------------------
 SELECT
   'TVL' AS metric,
