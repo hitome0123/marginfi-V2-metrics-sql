@@ -96,7 +96,7 @@ lp_main_prices AS (
     token_address,     
     price              
   FROM solana.price.ez_prices_hourly
-    AND hour = (  -- Only select the most recent hour
+  WHERE hour = (  -- Only select the most recent hour
       SELECT MAX(hour) 
       FROM solana.price.ez_prices_hourly 
     )
