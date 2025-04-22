@@ -78,7 +78,7 @@ To ensure stability and consistency with industry practices, this project adopts
 4️⃣ **Primary price source preference:** Prefer `ez_prices_hourly`, fallback to `fact_prices_ohlc_hourly.close` if unavailable.  
 5️⃣ **Decimals fallback:** If decimals are missing, infer via symbol heuristics (e.g. `*usd` = 6), or verified via chain lookup.  
 6️⃣ **Hour-based price granularity:** All prices are truncated to the hour using `DATE_TRUNC('hour', timestamp)`.  
-7️⃣ **Default date range:** All queries default to 30 days, editable in SQL.  
+7️⃣ **Default date range:** Most queries default to full dataset days, editable in SQL.  
 8️⃣ **Null-safe logic:** All numeric and metadata fields use `COALESCE()` for robust query behavior.
 
 ---
@@ -88,10 +88,9 @@ To ensure stability and consistency with industry practices, this project adopts
 All SQL queries can be run directly on Flipside Studio (https://flipsidecrypto.xyz):
 
 - **Platform:** Flipside Studio  
-- **Data Range:** Default to the past 30 days (modifiable)  
+- **Data Range:** Default to the all days (modifiable)  
 - **Run Interface:** Input SQL into Flipside Web UI  
 - **Output Format:** `metric_name` + `usd_value` pairs  
-- **Visualization:** Supports export to dashboards like Metabase, Superset, or Dune
 
 ---
 
