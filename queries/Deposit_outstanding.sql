@@ -110,7 +110,6 @@ lp_main_prices AS (
     AND hour = (  -- Only select the most recent hour
       SELECT MAX(hour) 
       FROM solana.price.ez_prices_hourly 
-      WHERE blockchain = 'solana'
     )
 ),
 
