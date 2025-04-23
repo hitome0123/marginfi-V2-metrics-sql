@@ -95,8 +95,9 @@ lp_main_prices AS (
   SELECT 
     token_address,     
     price              
-  FROM solana.price.ez_prices_hourly
-  WHERE hour = (  -- Only select the most recent hour
+  FROM solana.price.ez_prices_hourly 
+  WHERE blockchain = 'solana'
+  AND hour = (  -- Only select the most recent hour
       SELECT MAX(hour) 
       FROM solana.price.ez_prices_hourly 
     )
@@ -175,7 +176,7 @@ TVL AS (
       END
     ) AS net_amount_usd
   FROM marginfi_actions ma
-  INNER JOIN token_info ti ON ma.account_address = ti.account_address -- Map the token ATA to its corresponding mint address
+  LEFT JOIN token_info ti ON ma.account_address = ti.account_address -- Map the token ATA to its corresponding mint address
   LEFT JOIN asset_metadata am ON ti.mint = am.token_address   -- Retrieve the token's decimals information
   LEFT JOIN lp_final_prices lp ON am.token_address = lp.token_address -- Map token to latest price
   GROUP BY ti.mint, am.symbol
@@ -188,6 +189,7 @@ SELECT
   'TVL' AS metric,
   SUM(net_amount_usd) AS value 
 FROM TVL;
+
 
 
 
