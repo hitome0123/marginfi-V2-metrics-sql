@@ -1,3 +1,81 @@
+
+
+
+WITH deposit_actions AS (
+  SELECT 
+    a.event_type,
+    a.block_timestamp,
+    a.tx_id,
+    -- 主要账户角色提取并命名（可用于 transfer 匹配）
+    -- MAX(CASE WHEN acc.value:"name"::STRING = 'bankLiquidityVault' THEN acc.value:"pubkey"::STRING END) AS vault_address,
+    -- MAX(CASE WHEN acc.value:"name"::STRING = 'signerTokenAccount' THEN acc.value:"pubkey"::STRING END) AS user_token_account,
+  FROM solana.core.fact_decoded_instructions a,
+       LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
+  WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
+    AND a.event_type = 'lendingAccountDeposit' 
+  GROUP BY 
+    a.event_type, a.block_timestamp, a.tx_id
+),
+withdraw_actions AS (
+  SELECT 
+    a.event_type,
+    a.block_timestamp,
+    a.tx_id,
+    -- 主要账户角色提取并命名（可用于 transfer 匹配）
+    -- MAX(CASE WHEN acc.value:"name"::STRING = 'bankLiquidityVault' THEN acc.value:"pubkey"::STRING END) AS vault_address,
+    -- MAX(CASE WHEN acc.value:"name"::STRING = 'signerTokenAccount' THEN acc.value:"pubkey"::STRING END) AS user_token_account,
+  FROM solana.core.fact_decoded_instructions a,
+       LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
+  WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
+    AND a.event_type = 'lendingAccountWithdraw' 
+  GROUP BY 
+    a.event_type, a.block_timestamp, a.tx_id
+),
+-- 3. Trace protocol fee inflows to the vault owner
+-- Source: solana.core.fact_transfers
+-- Description:
+--   - Joins fee collection transactions with actual token transfers.
+--   - Ensures the destination (tx_to) of the transfer is the feeVault owner.
+--   - Filters only transactions where:
+--       a) The tx_id matches the original fee collection event.
+--       b) The vault owner is the recipient of the transfer.
+--       c) The amount is greater than 0 (ensures only real transfers are considered).
+-- This ensures that only genuine protocol-level inflows triggered by fee collection logic are captured.
+--------------------------------------------------------------------------------
+deposit_transfer_actions AS (
+  SELECT  distinct 
+    vo.block_timestamp, -- Timestamp of the fee transfer
+    vo.tx_id,         -- Transaction ID
+    t.mint,           -- Token mint
+    t.amount,
+    'deposit' as type
+  FROM deposit_actions vo 
+  INNER JOIN (
+  SELECT *
+  FROM solana.core.fact_transfers
+) t
+    ON vo.tx_id = t.tx_id -- Match transfers going to vault owner in the same transaction
+),
+withdraw_transfer_actions AS (
+  SELECT  distinct 
+    wa.block_timestamp, -- Timestamp of the fee transfer
+    wa.tx_id,         -- Transaction ID
+    t.mint,           -- Token mint
+    t.amount,
+    'withdraw' as type
+  FROM withdraw_actions wa
+  INNER JOIN (
+  SELECT *
+  FROM solana.core.fact_transfers
+) t
+    ON wa.tx_id = t.tx_id -- Match transfers going to vault owner in the same transaction
+)
+select * from withdraw_transfer_actions 
+union all 
+select * from deposit_transfer_actions 
+where tx_id = 'HgEwXbGTPYuxhiacV9hco8p4HgPTE7PmiNPFbaxm1nr4XiA7XgBeiJEKb5eZBJeT2nwtx2xYKAgt26fopWRo41G'
+
+---改到这！看看是不是同一个tx_id,mint 和 amount 都是一样的，如果是的话，就不用在tx_id的记录中找哪一条是真正的！！！
 --------------------------------------------------------------------------------
 -- 1. Extract decoded deposit and withdrawal instructions from MarginFi
 -- Source: solana.core.fact_decoded_instructions
