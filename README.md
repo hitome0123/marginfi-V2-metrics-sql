@@ -114,7 +114,7 @@ Not all tokens had entries in `ez_prices_hourly`.
 
 ### ✅ Challenge 4: Slow query performance on full-scale metrics  
 TVL queries with large joins and normalization took over 200s.  
-**Solution:** Added time windows (e.g., 30 days for borrow), pre-filtered tokens, modularized queries, and reduced join depth.
+**Solution:** Added  pre-filtered tokens, modularized queries, and reduced join depth.
 
 ---
 
