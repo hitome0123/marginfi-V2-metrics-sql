@@ -15,7 +15,6 @@ WITH marginfi_borrows AS (
     AND a.event_type = 'lendingAccountBorrow'  -- Borrow event type
     AND acc.value:"name"::STRING = 'destinationTokenAccount'  -- Account name must be destinationTokenAccount
     -- destinationTokenAccount reflects the user's receiving account, capturing actual outflow from the protocol
-    AND a.BLOCK_TIMESTAMP >= CURRENT_DATE - INTERVAL '30 days' -- Only keep data from the last 30 days
 ),
 --------------------------------------------------------------------------------
 -- 2. Map Token Account to Mint for identifying token types
@@ -90,7 +89,6 @@ hp_main_prices AS (
     price,                   
     hour                       -- Hourly timestamp used to match borrow event timing
   FROM solana.price.ez_prices_hourly
-  WHERE hour >= CURRENT_DATE - INTERVAL '30 days'
 ),
 
 -- ② Backup price source (OHLC closing price)
@@ -104,7 +102,6 @@ hp_backup_prices AS (
   FROM solana.price.fact_prices_ohlc_hourly f
   JOIN solana.price.dim_asset_metadata dm 
     ON f.asset_id = dm.asset_id -- join on “asset_id” as the primary key
-    WHERE hour >= CURRENT_DATE - INTERVAL '30 days'
 ),
 -- ③ Merge primary and backup price sources
 -- Prefer the primary price; fallback to backup price if primary is missing
