@@ -14,7 +14,7 @@ Metric designs follow standard practices in on-chain finance analytics, inspired
 - [2. Data Sources Used](#2-data-sources-used)
 - [3. Key Assumptions / Fallback Strategy](#3-key-assumptions--fallback-strategy)
 - [4. How to Run/Test the Queries](#4-how-to-runtest-the-queries)
-
+- [5. Challenges and Solutions](#5-challenges-and-solutions)
 ---
 
 ## 1. Metric Explanation
@@ -90,7 +90,80 @@ All SQL queries can be run directly on Flipside Studio (https://flipsidecrypto.x
 - **Platform:** Flipside Studio  
 - **Data Range:** Default to the all days (modifiable)  
 - **Run Interface:** Input SQL into Flipside Web UI  
-- **Output Format:** `metric_name` + `usd_value` pairs  
+- **Output Format:** `metric_name` + `usd_value` pairs
+  
+## 5. Challenges and Solutions
+
+### ✅ Challenge 1: Unconventional protocol structure in MarginFi  
+MarginFi adopts a custom lending architecture involving `bankLiquidityVault` and non-standard event types, differing from typical models like Aave or Compound.  
+**Solution:** Analyzed decoded instructions via Flipside and aligned logic with MarginFi contracts to distinguish user vs protocol flows.
+
+---
+
+### ✅ Challenge 2: Missing or incomplete metadata (especially decimals)  
+LP tokens and meme tokens like PumpFun often lack `decimals` in `ez_asset_metadata`.  
+**Solution:** Used symbol-based heuristics (e.g., `%usd%` → 6 decimals) and manually patched key tokens with verified fallback values.
+
+---
+
+### ✅ Challenge 3: Incomplete price data from primary source  
+Not all tokens had entries in `ez_prices_hourly`.  
+**Solution:** Combined with `fact_prices_ohlc_hourly` using full outer join and fallback to `close` price to ensure price coverage.
+
+---
+
+### ✅ Challenge 4: Slow query performance on full-scale metrics  
+TVL queries with large joins and normalization took over 200s.  
+**Solution:** Added time windows (e.g., 30 days for borrow), pre-filtered tokens, modularized queries, and reduced join depth.
+
+---
+
+### ✅ Challenge 5: Differentiating protocol revenue vs protocol fees  
+Fees logged via `lendingPoolCollectBankFees` don’t guarantee real inflow.  
+**Solution:** Parsed vault addresses, verified owners via `fact_token_account_owners`, and matched transfers using `tx_id + owner`.
+
+---
+
+### ✅ Challenge 6: Event logs ≠ actual inflow  
+Some fee events don’t move real funds.  
+**Solution:** Only counted confirmed inflows to `feeVault` and `insuranceVault`, validated by token transfer records.
+
+---
+
+### ✅ Challenge 7: Outlier tokens distorted metrics  
+Low-liquidity tokens without price data inflated TVL and revenue.  
+**Solution:** Manually excluded tokens with <5 holders or no price feed.
+
+---
+
+### ✅ Challenge 8: Granularity mismatch between metric types  
+Volume metrics require event-hour prices; snapshot metrics need latest prices.  
+**Solution:** Applied separate logic: volume uses historical prices, TVL/outstanding use latest hourly prices.
+
+---
+
+### ✅ Challenge 9: Changing event structures  
+Decoded instruction formats may change due to program upgrades.  
+**Solution:** Used `LATERAL FLATTEN` + `account.name` to dynamically extract target fields like `signerTokenAccount`.
+
+---
+
+### ✅ Challenge 10: Multiple program_ids for MarginFi  
+Old/test contracts pollute results.  
+**Solution:** Restricted queries to the verified v2 program_id: `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA`.
+
+---
+
+### ✅ Challenge 11: Overlapping account fields in events  
+Same event may include `signerTokenAccount` and `destinationTokenAccount`.  
+**Solution:** Defined per-metric account usage rules to avoid double-counting.
+
+---
+
+### ✅ Challenge 12: No clear distinction between user and protocol accounts  
+Solana doesn’t differentiate EOAs from contract vaults.  
+**Solution:** Used `fact_token_account_owners` to validate protocol-controlled token accounts only.
+
 
 ---
 
