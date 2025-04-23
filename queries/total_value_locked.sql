@@ -75,7 +75,7 @@ union all
 select * from deposit_transfer_actions 
 where tx_id = 'HgEwXbGTPYuxhiacV9hco8p4HgPTE7PmiNPFbaxm1nr4XiA7XgBeiJEKb5eZBJeT2nwtx2xYKAgt26fopWRo41G'
 
----改到这！看看是不是同一个tx_id,mint 和 amount 都是一样的，如果是的话，就不用在tx_id的记录中找哪一条是真正的！！！
+---4.23 18:07改到这！看看是不是同一个tx_id,mint 和 amount 都是一样的，如果是的话，就不用在tx_id的记录中找哪一条是真正的！！！
 --------------------------------------------------------------------------------
 -- 1. Extract decoded deposit and withdrawal instructions from MarginFi
 -- Source: solana.core.fact_decoded_instructions
