@@ -1,3 +1,356 @@
+WITH decoded_deposit AS (
+  SELECT 
+    a.tx_id,
+    MAX(CASE WHEN acc.value:"name"::STRING = 'signer' THEN acc.value:"pubkey"::STRING END) AS signer,
+    MAX(CASE WHEN acc.value:"name"::STRING = 'bankLiquidityVault' THEN acc.value:"pubkey"::STRING END) AS vault_token_account
+  FROM solana.core.fact_decoded_instructions a,
+       LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
+  WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
+    AND a.event_type = 'lendingAccountDeposit'
+    AND a.block_timestamp >= CURRENT_DATE - INTERVAL '30 days'  -- ✅ 可选时间范围控制
+  GROUP BY a.tx_id
+),
+
+vault_owner_lookup AS (
+  SELECT 
+    account_address, 
+    owner AS vault_owner
+  FROM solana.core.fact_token_account_owners
+),
+
+transfers_to_vault AS (
+  SELECT 
+    t.tx_id,
+    t.mint,
+    t.amount,
+    t.tx_from,
+    t.tx_to
+  FROM solana.core.fact_transfers t
+  WHERE t.block_timestamp >= CURRENT_DATE - INTERVAL '30 days'
+),
+
+joined_deposits AS (
+  SELECT 
+    d.tx_id,
+    d.signer,
+    d.vault_token_account,
+    v.vault_owner,
+    t.mint,
+    t.amount
+  FROM decoded_deposit d
+  LEFT JOIN vault_owner_lookup v ON d.vault_token_account = v.account_address
+  INNER JOIN transfers_to_vault t 
+    ON d.tx_id = t.tx_id
+   AND t.tx_from = d.signer
+   AND t.tx_to = v.vault_owner
+),
+
+lp_main_prices AS (
+  SELECT token_address, price
+  FROM (
+    SELECT 
+      token_address,
+      price,
+      ROW_NUMBER() OVER (PARTITION BY token_address ORDER BY hour DESC) AS rn
+    FROM solana.price.ez_prices_hourly
+    WHERE blockchain = 'solana'
+  ) ranked
+  WHERE rn = 1
+)
+
+
+
+SELECT 
+  j.mint,
+  SUM(j.amount) AS net_amount_raw,
+  SUM(j.amount * COALESCE(p.price, 0)) AS net_amount_usd
+FROM joined_deposits j
+LEFT JOIN lp_main_prices p ON j.mint = p.token_address
+GROUP BY j.mint;
+------------这是算deposit的----------------
+
+
+
+WITH deposit_withdraw_actions AS (
+  SELECT 
+    a.event_type,
+    a.tx_id,
+  FROM solana.core.fact_decoded_instructions a,
+       LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
+  WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
+    AND a.event_type in( 'lendingAccountWithdraw' ,'lendingAccountDeposit')
+  -- GROUP BY 
+    -- a.event_type, a.block_timestamp, a.tx_id
+),
+deposit_WITHDRAW_transfer_actions AS (
+  SELECT  distinct 
+    dw.tx_id,         -- Transaction ID
+    t.mint,           -- Token mint
+    t.amount,
+    dw.event_type
+  FROM deposit_withdraw_actions dw 
+  INNER JOIN (
+  SELECT distinct tx_id,mint,amount
+  FROM solana.core.fact_transfers
+) t
+    ON dw.tx_id = t.tx_id -- Match transfers going to vault owner in the same transaction
+),
+--------------------------------------------------------------------------------
+-- 4. Retrieve latest price for each token (used in Borrow Outstanding calculation)
+-- Only the latest hour’s price is needed, not historical hourly prices
+-- Priority:
+--   - Primary: ez_prices_hourly
+--   - Fallback: fact_prices_ohlc_hourly (close)
+--------------------------------------------------------------------------------
+-- ① Primary price source (Only fetch the most recent hour’s data for each token)
+-- Source: mainstream on-chain price table “ez_prices_hourly”
+lp_main_prices AS (
+  SELECT 
+    token_address,     
+    price              
+  FROM solana.price.ez_prices_hourly 
+  WHERE blockchain = 'solana'
+  AND hour = (  -- Only select the most recent hour
+      SELECT MAX(hour) 
+      FROM solana.price.ez_prices_hourly 
+    )
+),
+
+-- ② Backup price source (OHLC closing price)
+-- Source: “close” field from “fact_prices_ohlc_hourly” table
+-- Used as a fallback when the main price source is missing
+lp_backup_prices AS (
+  SELECT 
+    dm.token_address,  
+    f.close AS price   -- Fallback price: use OHLC close as hourly consensus price
+  FROM solana.price.fact_prices_ohlc_hourly f
+  INNER JOIN solana.price.dim_asset_metadata dm 
+    ON f.asset_id = dm.asset_id
+  WHERE dm.blockchain = 'solana'
+    AND f.hour = (  -- Same as above: fetch only the most recent hourly data
+      SELECT MAX(hour) 
+      FROM solana.price.fact_prices_ohlc_hourly
+    )
+),
+
+-- ③ Merge primary and backup price sources
+-- Prefer the primary price; fallback to backup price if primary is missing
+lp_final_prices AS (
+  SELECT 
+    COALESCE(lm.token_address, lb.token_address) AS token_address,  -- Prefer token address from the primary price source
+    COALESCE(lm.price, lb.price) AS price                           -- Fallback to backup price if missing
+  FROM lp_main_prices lm  
+  LEFT JOIN lp_backup_prices lb
+    ON lm.token_address = lb.token_address
+),
+TVL AS (
+  SELECT 
+    ti.mint,         -- Token mint address (unique identifier)
+
+    -- Raw Total amount locked amount (not normalized by decimals), calculated as: deposit - withdraw    
+    SUM(
+      CASE 
+        WHEN dw.event_type = 'deposit' THEN COALESCE(da.amount, 0)
+        WHEN wa.event_type = 'withdraw' THEN -COALESCE(wa.raw_amount, 0)
+        ELSE 0
+      END
+    ) AS net_amount_raw,
+
+   -- Total Value Locked amount in USD = normalized token amount × latest price
+    SUM(
+      CASE 
+        WHEN  dw.event_type = 'lendingAccountDeposit' THEN 
+        (COALESCE(dw.amount, 0) 
+      * COALESCE(lp.price, 0)                   -- Use latest price; fallback to 0 if missing
+        WHEN wa.event_type = 'lendingAccountWithdraw' THEN 
+          (-COALESCE(dw.raw_amount, 0) 
+        * COALESCE(lp.price, 0)                 -- Use latest price; fallback to 0 if missing
+        ELSE 0
+      END
+    ) AS net_amount_usd
+  FROM deposit_WITHDRAW_transfer_actions dw
+  LEFT JOIN lp_final_prices lp ON dw.mint = lp.token_address -- Map token to latest price
+  GROUP BY dw.mint
+)  
+
+WITH deposit_actions AS (
+  SELECT 
+    a.event_type,
+    a.block_timestamp,
+    a.tx_id,
+    -- 主要账户角色提取并命名（可用于 transfer 匹配）
+    -- MAX(CASE WHEN acc.value:"name"::STRING = 'bankLiquidityVault' THEN acc.value:"pubkey"::STRING END) AS vault_address,
+    -- MAX(CASE WHEN acc.value:"name"::STRING = 'signerTokenAccount' THEN acc.value:"pubkey"::STRING END) AS user_token_account,
+  FROM solana.core.fact_decoded_instructions a,
+       LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
+  WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
+    AND a.event_type = 'lendingAccountDeposit' 
+  GROUP BY 
+    a.event_type, a.block_timestamp, a.tx_id
+),
+withdraw_actions AS (
+  SELECT 
+    a.event_type,
+    a.block_timestamp,
+    a.tx_id,
+    -- 主要账户角色提取并命名（可用于 transfer 匹配）
+    -- MAX(CASE WHEN acc.value:"name"::STRING = 'bankLiquidityVault' THEN acc.value:"pubkey"::STRING END) AS vault_address,
+    -- MAX(CASE WHEN acc.value:"name"::STRING = 'signerTokenAccount' THEN acc.value:"pubkey"::STRING END) AS user_token_account,
+  FROM solana.core.fact_decoded_instructions a,
+       LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
+  WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
+    AND a.event_type = 'lendingAccountWithdraw' 
+  GROUP BY 
+    a.event_type, a.block_timestamp, a.tx_id
+),
+-- 3. Trace protocol fee inflows to the vault owner
+-- Source: solana.core.fact_transfers
+-- Description:
+--   - Joins fee collection transactions with actual token transfers.
+--   - Ensures the destination (tx_to) of the transfer is the feeVault owner.
+--   - Filters only transactions where:
+--       a) The tx_id matches the original fee collection event.
+--       b) The vault owner is the recipient of the transfer.
+--       c) The amount is greater than 0 (ensures only real transfers are considered).
+-- This ensures that only genuine protocol-level inflows triggered by fee collection logic are captured.
+--------------------------------------------------------------------------------
+deposit_transfer_actions AS (
+  SELECT  distinct 
+    vo.block_timestamp, -- Timestamp of the fee transfer
+    vo.tx_id,         -- Transaction ID
+    t.mint,           -- Token mint
+    t.amount,
+    'deposit' as type
+  FROM deposit_actions vo 
+  INNER JOIN (
+  SELECT distinct tx_id,mint,amount
+  FROM solana.core.fact_transfers
+) t
+    ON vo.tx_id = t.tx_id -- Match transfers going to vault owner in the same transaction
+),
+withdraw_transfer_actions AS (
+  SELECT  distinct 
+    wa.block_timestamp, -- Timestamp of the fee transfer
+    wa.tx_id,         -- Transaction ID
+    t.mint,           -- Token mint
+    t.amount,
+    'withdraw' as type
+  FROM withdraw_actions wa
+  INNER JOIN (
+  SELECT distinct tx_id,mint,amount
+  FROM solana.core.fact_transfers
+) t
+    ON wa.tx_id = t.tx_id -- Match transfers going to vault owner in the same transaction
+),
+--------------------------------------------------------------------------------
+-- 4. Retrieve latest price for each token (used in Borrow Outstanding calculation)
+-- Only the latest hour’s price is needed, not historical hourly prices
+-- Priority:
+--   - Primary: ez_prices_hourly
+--   - Fallback: fact_prices_ohlc_hourly (close)
+--------------------------------------------------------------------------------
+-- ① Primary price source (Only fetch the most recent hour’s data for each token)
+-- Source: mainstream on-chain price table “ez_prices_hourly”
+lp_main_prices AS (
+  SELECT 
+    token_address,     
+    price              
+  FROM solana.price.ez_prices_hourly 
+  WHERE blockchain = 'solana'
+  AND hour = (  -- Only select the most recent hour
+      SELECT MAX(hour) 
+      FROM solana.price.ez_prices_hourly 
+    )
+),
+
+-- ② Backup price source (OHLC closing price)
+-- Source: “close” field from “fact_prices_ohlc_hourly” table
+-- Used as a fallback when the main price source is missing
+lp_backup_prices AS (
+  SELECT 
+    dm.token_address,  
+    f.close AS price   -- Fallback price: use OHLC close as hourly consensus price
+  FROM solana.price.fact_prices_ohlc_hourly f
+  INNER JOIN solana.price.dim_asset_metadata dm 
+    ON f.asset_id = dm.asset_id
+  WHERE dm.blockchain = 'solana'
+    AND f.hour = (  -- Same as above: fetch only the most recent hourly data
+      SELECT MAX(hour) 
+      FROM solana.price.fact_prices_ohlc_hourly
+    )
+),
+
+-- ③ Merge primary and backup price sources
+-- Prefer the primary price; fallback to backup price if primary is missing
+lp_final_prices AS (
+  SELECT 
+    COALESCE(lm.token_address, lb.token_address) AS token_address,  -- Prefer token address from the primary price source
+    COALESCE(lm.price, lb.price) AS price                           -- Fallback to backup price if missing
+  FROM lp_main_prices lm  
+  LEFT JOIN lp_backup_prices lb
+    ON lm.token_address = lb.token_address
+),
+
+--------------------------------------------------------------------------------
+-- 5. Compute Token-Level Net Deposits (TVL Core Calculation)
+-- Source:
+--   - marginfi_actions: decoded deposit and withdrawal events (user token account level)
+--   - token_info: to map token account to mint
+--   - asset_metadata: to get decimals and token symbol
+--   - lp_final_prices: latest price per token (USD)
+--
+-- Description:
+--   - This step calculates the Total Value Locked (TVL) per token by aggregating:
+--       Raw deposits - withdrawals (from user accounts)
+--   - The result is expressed in:
+--       a) net_amount_raw (not normalized by decimals)
+--       b) USD value (normalized using decimals × latest price)
+--   - Deposits add to TVL, withdrawals subtract from it.
+--   - COALESCE is used to ensure all missing values default safely to 0.
+--------------------------------------------------------------------------------
+TVL AS (
+  SELECT 
+    ti.mint,         -- Token mint address (unique identifier)
+    am.symbol,       -- Token symbol
+
+    -- Raw Total amount locked amount (not normalized by decimals), calculated as: deposit - withdraw    
+    SUM(
+      CASE 
+        WHEN da.event_type = 'deposit' THEN COALESCE(da.amount, 0)
+        WHEN wa.event_type = 'withdraw' THEN -COALESCE(wa.raw_amount, 0)
+        ELSE 0
+      END
+    ) AS net_amount_raw,
+
+   -- Total Value Locked amount in USD = normalized token amount × latest price
+    SUM(
+      CASE 
+        WHEN  da.event_type = 'deposit' THEN 
+        (COALESCE(da.amount, 0) 
+      * COALESCE(lp.price, 0)                   -- Use latest price; fallback to 0 if missing
+        WHEN wa.event_type = 'withdraw' THEN 
+          (-COALESCE(wa.raw_amount, 0) 
+        * COALESCE(lp.price, 0)                 -- Use latest price; fallback to 0 if missing
+        ELSE 0
+      END
+    ) AS net_amount_usd
+  FROM deposit_transfer_actions da
+  LEFT JOIN withdraw_transfer_actions wa ON da.mint = ti.mint -- Map the token ATA to its corresponding mint address
+  LEFT JOIN lp_final_prices lp ON da.mint = lp.token_address -- Map token to latest price
+  GROUP BY da.mint
+)
+
+
+
+
+-- select distinct amount,mint 
+-- from withdraw_transfer_actions 
+-- select * from withdraw_transfer_actions 
+-- union all 
+-- select * from deposit_transfer_actions 
+-- where tx_id = 'HgEwXbGTPYuxhiacV9hco8p4HgPTE7PmiNPFbaxm1nr4XiA7XgBeiJEKb5eZBJeT2nwtx2xYKAgt26fopWRo41G'
+
+---4.23 18:07改到这！看看是不是同一个tx_id,mint 和 amount 都是一样的，如果是的话，就不用在tx_id的记录中找哪一条是真正的！！！
 
 
 
