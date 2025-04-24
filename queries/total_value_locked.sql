@@ -68,6 +68,63 @@ FROM joined_deposits j
 LEFT JOIN lp_main_prices p ON j.mint = p.token_address
 GROUP BY j.mint;
 ------------这是算deposit的----------------
+WITH decoded_withdraw AS (
+  SELECT 
+    a.tx_id,
+    MAX(CASE WHEN acc.value:"name" = 'signer' THEN acc.value:"pubkey" END) AS signer,
+    MAX(CASE WHEN acc.value:"name" = 'bankLiquidityVaultAuthority' THEN acc.value:"pubkey" END) AS vault_authority
+  FROM solana.core.fact_decoded_instructions a,
+       LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
+  WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
+    AND a.event_type = 'lendingAccountWithdraw'
+    AND a.block_timestamp >= CURRENT_DATE - INTERVAL '30 days'
+  GROUP BY a.tx_id
+),
+
+transfers_withdraw AS (
+  SELECT 
+    tx_id,
+    tx_from,
+    tx_to,
+    mint,
+    amount
+  FROM solana.core.fact_transfers
+  WHERE block_timestamp >= CURRENT_DATE - INTERVAL '30 days'
+),
+
+joined_withdraw AS (
+  SELECT 
+    d.tx_id,
+    t.mint,
+    t.amount
+  FROM decoded_withdraw d
+  JOIN transfers_withdraw t 
+    ON d.tx_id = t.tx_id
+   AND t.tx_from = d.vault_authority
+   AND t.tx_to = d.signer
+),
+
+latest_prices AS (
+  SELECT token_address, price
+  FROM (
+    SELECT 
+      token_address,
+      price,
+      ROW_NUMBER() OVER (PARTITION BY token_address ORDER BY hour DESC) AS rn
+    FROM solana.price.ez_prices_hourly
+    WHERE blockchain = 'solana'
+  ) ranked
+  WHERE rn = 1
+)
+
+SELECT 
+  j.mint,
+  SUM(j.amount) AS total_withdraw_raw,
+  SUM(j.amount * COALESCE(p.price, 0)) AS total_withdraw_usd
+FROM joined_withdraw j
+INNER JOIN latest_prices p ON j.mint = p.token_address
+GROUP BY j.mint
+ORDER BY total_withdraw_usd DESC;
 
 
 
