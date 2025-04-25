@@ -1,3 +1,78 @@
+WITH decoded_events AS (
+  SELECT 
+    a.tx_id,
+    a.event_type,
+    MAX(CASE WHEN acc.value:"name" = 'signer' THEN acc.value:"pubkey" END) AS signer,
+    MAX(CASE WHEN acc.value:"name" = 'bankLiquidityVault' THEN acc.value:"pubkey" END) AS vault_token_account
+  FROM solana.core.fact_decoded_instructions a,
+       LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
+  WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
+    AND a.event_type IN ('lendingAccountDeposit', 'lendingAccountWithdraw')
+-- and signer is not null
+  GROUP BY a.tx_id, a.event_type
+),
+vault_owner as (select a.owner from solana.core.fact_token_account_owners a
+inner join decoded_events b
+on b.vault_token_account = a.account_address
+)
+,
+relavant_tx_id as (
+select tx_id,tx_from,tx_to,mint,amount
+from solana.core.fact_transfers where tx_id in  (SELECT tx_id from decoded_events where signer is not null
+AND event_type = 'lendingAccountDeposit'
+)
+and ABS(amount) >= 1  -- 最常用的门槛值，剔除 0.01 以下的小额交易
+
+),
+
+transfers_deposit AS (
+  SELECT 
+    t.mint,
+    SUM(t.amount ) AS amount
+  FROM relavant_tx_id t   
+inner join vault_owner v 
+on t.tx_to = v.owner
+-- AND  t.tx_from = d.signer 
+group by t.mint
+)
+select * from transfers_deposit;
+   ---改到这！！！
+transfers_withdraw AS (
+  SELECT 
+    t.mint,
+   - SUM( t.amount ) AS amount
+  FROM decoded_events d
+  INNER JOIN relavant_tx_id t 
+    ON d.tx_id = t.tx_id
+   -- AND  t.tx_from = d.vault_token_account 
+-- AND t.tx_to = d.signer
+where d.event_type = 'lendingAccountWithdraw' 
+group by  t.mint
+   ),
+net_amounts AS (
+  SELECT 
+    d.mint,
+    SUM(d.amount+w.amount) AS net_amount
+  FROM transfers_deposit d 
+inner join transfers_withdraw w
+  GROUP BY d.mint
+),
+
+latest_prices AS (
+  SELECT 
+    token_address, 
+    price
+  FROM solana.price.ez_prices_hourly
+  WHERE blockchain = 'solana'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY token_address ORDER BY hour DESC) = 1
+)
+
+SELECT
+  SUM(n.net_amount * COALESCE(p.price, 0)) AS tvl_usd
+FROM net_amounts n
+INNER JOIN latest_prices p ON n.mint = p.token_address; 
+
+
 WITH decoded_deposit AS (
   SELECT 
     a.tx_id,
