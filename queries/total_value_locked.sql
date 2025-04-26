@@ -1,3 +1,143 @@
+
+
+WITH
+-- 1) 只拿出 MarginFi Deposit / Withdraw 的 tx_id + signer + vault_token_account
+decoded_events AS (
+  SELECT 
+    a.tx_id,
+    a.event_type,
+    MAX(CASE WHEN acc.value:"name" = 'signer' THEN acc.value:"pubkey" END) AS signer,
+    MAX(CASE WHEN acc.value:"name" = 'bankLiquidityVault' THEN acc.value:"pubkey" END) AS vault_token_account,
+    MAX(CASE WHEN acc.value:"name" = 'bankLiquidityVaultAuthority' THEN acc.value:"pubkey" END) AS vault_authority
+  FROM solana.core.fact_decoded_instructions a,
+       LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
+  WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
+    AND a.event_type IN ('lendingAccountDeposit', 'lendingAccountWithdraw')
+    -- AND acc.value:"name" IN ('signer', 'bankLiquidityVault', 'bankLiquidityVaultAuthority')
+    -- AND a.block_timestamp >= CURRENT_DATE - INTERVAL '30 days' -- (可加)
+
+  GROUP BY a.tx_id, a.event_type
+),
+-- WITH vaults AS (
+--   SELECT DISTINCT
+--     acc.value:"pubkey"::STRING AS vault_token_account
+--   FROM solana.core.fact_decoded_instructions a,
+--        LATERAL FLATTEN(input => a.decoded_instruction:"accounts") acc
+--   WHERE a.program_id = 'MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA'
+--     AND a.event_type = 'lendingAccountDeposit'
+--     AND acc.value:"name" = 'bankLiquidityVault'
+--     AND a.block_timestamp >= CURRENT_DATE - INTERVAL '30 days' -- (可加)
+ 
+-- ),
+
+vault_owners AS (
+  SELECT v.signer,
+    a.account_address,
+    a.owner AS vault_owner
+  FROM solana.core.fact_token_account_owners a
+  INNER JOIN (select vault_token_account,signer from decoded_events where event_type ='lendingAccountDeposit') v
+    ON a.account_address = v.vault_token_account
+),
+
+relevant_deposit_transfers AS (
+  SELECT 
+    t.mint,
+    t.amount
+  FROM solana.core.fact_transfers t
+  INNER JOIN vault_owners v
+    ON t.tx_to = v.vault_owner
+  WHERE t.amount > 0.1
+    AND t.amount < 100000000  -- 排除异常值
+    AND t.block_timestamp >= CURRENT_DATE - INTERVAL '30 days'
+    AND t.tx_id IN (
+      SELECT tx_id 
+      FROM decoded_events 
+      WHERE event_type = 'lendingAccountDeposit'
+    )
+    AND signer IN (
+      SELECT signer 
+      FROM decoded_events 
+      WHERE event_type = 'lendingAccountDeposit'
+    )
+),
+
+
+deposit_tx as (SELECT 
+  mint,
+  SUM(amount) AS total_deposit_raw
+FROM relevant_deposit_transfers
+GROUP BY mint),
+
+
+
+relevant_withdraw_transfers AS (
+  SELECT 
+    t.mint,
+    t.amount,t.tx_id
+  FROM solana.core.fact_transfers t
+  INNER JOIN (
+    SELECT DISTINCT vault_authority
+    FROM decoded_events
+    WHERE event_type = 'lendingAccountWithdraw'
+  ) v 
+    ON t.tx_from = v.vault_authority  -- ✅ 注意 tx_from
+
+  WHERE t.block_timestamp >= CURRENT_DATE - INTERVAL '30 days'  -- ✅ WHERE 放这里
+    AND t.amount > 0.1 
+AND t.amount < 100000000   -- 排除不太可能的巨额交易，比如超千万 Token
+AND t.tx_id IN (
+      SELECT tx_id 
+      FROM decoded_events 
+      WHERE event_type = 'lendingAccountWithdraw'
+    )
+
+),
+
+
+
+withdraw_tx as (SELECT 
+  mint,
+  SUM(amount) AS total_withdraw_raw
+FROM relevant_withdraw_transfers
+GROUP BY mint),
+
+latest_prices AS (
+  SELECT 
+    token_address, 
+    price
+  FROM solana.price.ez_prices_hourly
+  WHERE blockchain = 'solana'
+and hour = (select max(hour) from solana.price.ez_prices_hourly)
+and token_address in (
+      ('So11111111111111111111111111111111111111112'), -- SOL
+      ('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'), -- USDC
+      ('Es9vMFrzaCERj88ALxyJPAmUJqPyaGkdp1bY9czFz3KF'), -- USDT
+      ('7vfCXTtxp8N9Tz5KDqq9U8sB5GqV5YhtdUf8Qg49pL5Q')  -- ETH
+ 
+)
+
+)
+SELECT
+  SUM(
+    (COALESCE(d.total_deposit_raw, 0) - COALESCE(w.total_withdraw_raw, 0))
+    * COALESCE(p.price, 0)
+  ) AS tvl_usd
+FROM deposit_tx d 
+INNER JOIN withdraw_tx w 
+  ON d.mint = w.mint
+INNER JOIN latest_prices p 
+  ON d.mint = p.token_address;
+
+
+
+-- select * from withdraw_tx;
+
+
+
+
+
+
+
 WITH decoded_events AS (
   SELECT 
     a.tx_id,
