@@ -223,7 +223,7 @@ WHERE
 AND outstanding_volume_raw > 0.1
 )
 --------------------------------------------------------------------------------
--- 6. Borrow Outstanding Summary
+-- 8. Borrow Outstanding Summary
 -- This section summarizes the Borrow_outstanding across all assets.
 -- Final output values are converted and presented in millions (M USD) for better readability.
 --------------------------------------------------------------------------------
