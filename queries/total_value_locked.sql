@@ -64,6 +64,7 @@ asset_metadata AS (
         WHEN LOWER(ezm.symbol) LIKE '%usd%' THEN 6  -- Stablecoins & LPs (e.g., LP-USDC, cUSDC): use 6 decimals
         WHEN LOWER(ezm.symbol) LIKE '%eth%' THEN 8  -- ETH-related tokens: use 8 decimals
         WHEN LOWER(ezm.symbol) LIKE '%sol' THEN 9   -- SOL-related tokens: use 9 decimals
+
         -- PumpFun tokens: default to 6
         WHEN LOWER(ezm.symbol) LIKE '%pump%' THEN 6 
         WHEN LOWER(ezm.token_address) LIKE '%pump' THEN 6
@@ -201,6 +202,8 @@ AND net_amount_raw > 0.1
 
 --------------------------------------------------------------------------------
 -- 6. Total Value Locked  Summary
+-- This section summarizes the Total Value Locked (TVL) across all assets.
+-- Final output values are converted and presented in millions (M USD) for better readability.
 --------------------------------------------------------------------------------
 SELECT
   'TVL_usd(M)' AS metric,
