@@ -94,76 +94,101 @@ All SQL queries can be run directly on Flipside Studio (https://flipsidecrypto.x
   
 ## 5. Challenges and Solutions
 
-### ✅ Challenge 1: Unconventional protocol structure in MarginFi  
-MarginFi adopts a custom lending architecture involving `bankLiquidityVault` and non-standard event types, differing from typical models like Aave or Compound.  
-**Solution:** Analyzed decoded instructions via Flipside and aligned logic with MarginFi contracts to distinguish user vs protocol flows.
+# Challenges and Solutions
+
+## **Challenge 1: MarginFi Protocol Structure Differs from Standard DeFi Protocols**
+MarginFi adopts a unique lending architecture involving "bankLiquidityVault" and custom event types. To ensure accurate metrics, I thoroughly analyzed the **MarginFi protocol's architecture** and designed the metrics based on its unique structure.
+
+**✅ Solution:**  
+- I analyzed MarginFi's decoded instruction structure and referenced its architecture to ensure metrics reflect the actual operation of the protocol.
 
 ---
 
-### ✅ Challenge 2: Missing or incomplete metadata (especially decimals)  
-LP tokens and meme tokens like PumpFun often lack `decimals` in `ez_asset_metadata`.  
-**Solution:** Used symbol-based heuristics (e.g., `%usd%` → 6 decimals) and manually patched key tokens with verified fallback values.
+## **Challenge 2: Missing or Incomplete Metadata, Especially Decimals**
+Some tokens, particularly LP tokens and meme coins like pumpfun, are missing decimals in `ez_asset_metadata`, or have ambiguous or missing symbols.
+
+**✅ Solution:**  
+- I implemented a fallback mechanism using symbol-based heuristics (e.g., `%usd% → 6 decimals`) and manually patched verified tokens to ensure normalization.
 
 ---
 
-### ✅ Challenge 3: Incomplete price data from primary source  
-Not all tokens had entries in `ez_prices_hourly`.  
-**Solution:** Combined with `fact_prices_ohlc_hourly` using full outer join and fallback to `close` price to ensure price coverage.
+## **Challenge 3: Incomplete Price Data from Primary Source**
+Although `ez_prices_hourly` is the primary price feed, it lacks price records for some tokens.
+
+**✅ Solution:**  
+- I joined it with `fact_prices_ohlc_hourly` table using a full outer join and fallback to close prices if the primary source is missing, ensuring full coverage in USD valuation.
 
 ---
 
-### ✅ Challenge 4: Slow query performance on full-scale metrics  
-TVL queries with large joins and normalization took over 200s.  
-**Solution:** Added  pre-filtered tokens, modularized queries, and reduced join depth.
+## **Challenge 4: Slow Query Performance for Large-Scale Metrics like TVL**
+TVL calculation involves large data scans, account flattening, multiple joins, and normalization, causing queries to run for over 200 seconds.
+
+**✅ Solution:**  
+- I pre-filtered token accounts, modularized subqueries, and performed aggregation before joins to improve performance.
 
 ---
 
-### ✅ Challenge 5: Differentiating protocol revenue vs protocol fees  
-Fees logged via `lendingPoolCollectBankFees` don’t guarantee real inflow.  
-**Solution:** Parsed vault addresses, verified owners via `fact_token_account_owners`, and matched transfers using `tx_id + owner`.
+## **Challenge 5: Differentiating Protocol Revenue vs. Protocol Fees**
+While `lendingPoolCollectBankFees` event logs fee collection events, actual revenue includes real inflows to `feeVault` or `insuranceVault`, which must be validated separately.
+
+**✅ Solution:**  
+- I parsed vault addresses from decoded instructions, verified ownership via `fact_token_account_owners`, and matched transactions via `tx_id` + `owner` in `fact_transfers` table to differentiate protocol fees from liquidation revenue.
 
 ---
 
-### ✅ Challenge 6: Event logs ≠ actual inflow  
-Some fee events don’t move real funds.  
-**Solution:** Only counted confirmed inflows to `feeVault` and `insuranceVault`, validated by token transfer records.
+## **Challenge 6: Event-Based Data Does Not Guarantee Actual Inflow**
+Not all fee events result in on-chain token transfers. Some events are logged but no funds move.
+
+**✅ Solution:**  
+- I ensured all fee/revenue metrics were based on verified inflows by linking `feeVault` addresses to actual transfers and validating owners.
 
 ---
 
-### ✅ Challenge 7: Outlier tokens distorted metrics  
-Low-liquidity tokens without price data inflated TVL and revenue.  
-**Solution:** Manually excluded tokens with <5 holders or no price feed.
+## **Challenge 7: Outlier Tokens Skew Results with Unrealistic Valuation**
+Some obscure tokens lack price data and have fewer than 5 holders. Including them distorts TVL and revenue numbers.
+
+**✅ Solution:**  
+- I **did not apply fallback** to these tokens, avoiding their impact on the final **USD valuation**. This ensures that illiquid or worthless tokens do not inflate the results.
 
 ---
 
-### ✅ Challenge 8: Granularity mismatch between metric types  
-Volume metrics require event-hour prices; snapshot metrics need latest prices.  
-**Solution:** Applied separate logic: volume uses historical prices, TVL/outstanding use latest hourly prices.
+## **Challenge 8: Inconsistent Price Granularity Across Different Metrics**
+Volume-based metrics should use event-time prices, while snapshot-based metrics (like Outstanding) require the latest prices.
+
+**✅ Solution:**  
+- I implemented separate logic per metric type: Volume/Fees used “historical hourly prices”, while TVL/Outstanding used the most recent price, in line with industry practices.
 
 ---
 
-### ✅ Challenge 9: Changing event structures  
-Decoded instruction formats may change due to program upgrades.  
-**Solution:** Used `LATERAL FLATTEN` + `account.name` to dynamically extract target fields like `signerTokenAccount`.
+## **Challenge 9: Changing Event Structure Over Time Due to Program Upgrades**
+The decoded instruction structure of events can change (e.g., account ordering), which can break hardcoded SQL logic.
+
+**✅ Solution:**  
+- I used `LATERAL FLATTEN` and matched on `account.name` to dynamically identify target fields like `signerTokenAccount`, ensuring future-proof compatibility.
 
 ---
 
-### ✅ Challenge 10: Multiple program_ids for MarginFi  
-Old/test contracts pollute results.  
-**Solution:** Restricted queries to the verified v2 program_id: `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA`.
+## **Challenge 10: Overlapping Account Fields Across Events May Cause Double-Counting**
+Some events include `signerTokenAccount` and `destinationTokenAccount`. Misinterpreting these fields could lead to duplicated volume or TVL.
+
+**✅ Solution:**  
+- I defined per-metric field logic: TVL uses `signerTokenAccount`, Borrow Volume uses `destinationTokenAccount`, and each metric only counts its own flow.
 
 ---
 
-### ✅ Challenge 11: Overlapping account fields in events  
-Same event may include `signerTokenAccount` and `destinationTokenAccount`.  
-**Solution:** Defined per-metric account usage rules to avoid double-counting.
+## **Challenge 11: No Built-in Distinction Between User and Protocol Addresses**
+Solana does not distinguish externally owned accounts (EOAs) from contracts, making it hard to separate user wallets from protocol vaults.
+
+**✅ Solution:**  
+- I validated token account owners using `fact_token_account_owners` table and only treated accounts owned by MarginFi’s program as protocol-level inflows/outflows.
 
 ---
 
-### ✅ Challenge 12: No clear distinction between user and protocol accounts  
-Solana doesn’t differentiate EOAs from contract vaults.  
-**Solution:** Used `fact_token_account_owners` to validate protocol-controlled token accounts only.
+## **Challenge 12: Overflow Risks in the Amount Parameter Inside `decoded_instruction` Field of `solana.core.fact_decoded_instructions`**
+In Solana’s `solana.core.fact_decoded_instructions` table, the `decoded_instruction` JSON field sometimes contains an `amount` parameter with overflowed or abnormal values, caused by data inconsistencies or edge cases. These anomalies can significantly distort volume, TVL, or outstanding calculations if not properly handled.
 
+**✅ Solution:**  
+- I applied upper-bound filters when extracting the `amount` parameter, capping maximum values at reasonable thresholds (e.g., < 1e7 for mainstream tokens and < 1e8 for minor tokens) to exclude extreme outliers and maintain data integrity.
 
 ---
 
