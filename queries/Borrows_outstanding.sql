@@ -86,11 +86,14 @@ asset_metadata AS (
     ezm.symbol,        -- Token symbol (used for inferring decimal precision if missing)
     COALESCE(
       ezm.decimals,  -- Prioritize the official decimals
-      -- If missing, try symbol-based inference
+
+    -- If missing, infer decimals from symbol patterns: 
+    -- LP tokens generally share the same decimal precision as their native tokens (e.g., USDC-LP uses the same decimals as USDC)
       CASE 
         WHEN LOWER(ezm.symbol) LIKE '%usd%' THEN 6  -- Stablecoins & LPs (e.g., LP-USDC, cUSDC): use 6 decimals
         WHEN LOWER(ezm.symbol) LIKE '%eth%' THEN 8  -- ETH-related tokens: use 8 decimals
         WHEN LOWER(ezm.symbol) LIKE '%sol' THEN 9   -- SOL-related tokens: use 9 decimals
+
         -- PumpFun tokens: default to 6
         WHEN LOWER(ezm.symbol) LIKE '%pump%' THEN 6 
         WHEN LOWER(ezm.token_address) LIKE '%pump' THEN 6
@@ -114,6 +117,10 @@ asset_metadata AS (
 -- Priority:
 --   - Primary: ez_prices_hourly
 --   - Fallback: fact_prices_ohlc_hourly (close)
+-- Explanation: The latest price is used for Borrow Outstanding to reflect the current market value of outstanding borrowed assets.
+---Since Borrow Outstanding represents the current debt that users owe, 
+---it is essential to calculate it using the most up-to-date prices to ensure accuracy and consistency with current market conditions.
+---Using the latest price helps avoid miscalculations due to historical price fluctuations and ensures the debt is valued in real-time.
 --------------------------------------------------------------------------------
 -- ① Primary price source (Only fetch the most recent hour’s data for each token)
 -- Source: mainstream on-chain price table “ez_prices_hourly”
@@ -126,7 +133,6 @@ lp_main_prices AS (
     AND hour = (  -- Only select the most recent hour
       SELECT MAX(hour) 
       FROM solana.price.ez_prices_hourly 
-      WHERE blockchain = 'solana'
     )
 ),
 
@@ -134,18 +140,20 @@ lp_main_prices AS (
 -- Source: “close” field from “fact_prices_ohlc_hourly” table
 -- Used as a fallback when the main price source is missing
 lp_backup_prices AS (
-  SELECT 
-    dm.token_address,  
-    f.close AS price   -- Fallback price: use OHLC close as hourly consensus price
-  FROM solana.price.fact_prices_ohlc_hourly f
-  INNER JOIN solana.price.dim_asset_metadata dm 
-    ON f.asset_id = dm.asset_id
-  WHERE dm.blockchain = 'solana'
-    AND f.hour = (  -- Same as above: fetch only the most recent hourly data
-      SELECT MAX(hour) 
-      FROM solana.price.fact_prices_ohlc_hourly
-    )
+  SELECT *
+  FROM (
+    SELECT 
+      dm.token_address,
+      f.close AS price,
+      ROW_NUMBER() OVER (PARTITION BY dm.token_address ORDER BY f.hour DESC) AS rn
+    FROM solana.price.fact_prices_ohlc_hourly f
+    INNER JOIN solana.price.dim_asset_metadata dm 
+      ON f.asset_id = dm.asset_id
+    WHERE dm.blockchain = 'solana'
+  ) t
+  WHERE rn = 1
 ),
+
 
 -- ③ Merge primary and backup price sources
 -- Prefer the primary price; fallback to backup price if primary is missing
@@ -162,15 +170,18 @@ lp_final_prices AS (
 -- Source: protocol-perspective events from BankLiquidityVault
 -- Logic: Outstanding = borrow - repay - liquidate, then multiply by latest token price
 --------------------------------------------------------------------------------
-outstanding_volume AS (
+outstanding_volume AS ( SELECT * FROM(
   SELECT
     ti.mint,                         -- Token  mint address
-    -- Raw outstanding amount (not normalized by decimals), calculated as: borrow - repay - liquidate    
+    am.symbol,
+
+    -- Outstanding amount (normalized by decimals), calculated as: borrow - repay - liquidate    
   SUM(
-      COALESCE(ba.borrow_raw_amount, 0) 
-      - COALESCE(ra.repay_raw_amount, 0) 
-      - COALESCE(la.liquidate_raw_amount, 0)
+      COALESCE(ba.borrow_raw_amount, 0) /POWER(10, COALESCE(am.decimals, 0))
+      - COALESCE(ra.repay_raw_amount, 0) /POWER(10, COALESCE(am.decimals, 0))
+      - COALESCE(la.liquidate_raw_amount, 0)/POWER(10, COALESCE(am.decimals, 0))
     ) AS outstanding_volume_raw,
+
   -- Outstanding balance (in USD) = normalized token amount × latest price (from lp_final_prices)
   SUM(
       (
@@ -192,14 +203,32 @@ outstanding_volume AS (
     ON am.token_address = ra.repay_token_address
   LEFT JOIN liquidate_actions la 
     ON am.token_address = la.liquidate_token_address
-  GROUP BY ti.mint             
+  GROUP BY ti.mint,am.symbol       
+)
+WHERE 
+
+    --  Mainstream assets (USDC, SOL, mSOL, ETH, BTC)
+    --     - Restrict net locked amount to less than 10 million (1e7) units
+    --     - Prevent abnormal large balances from distorting TVL calculations
+    (symbol IN ('USDC', 'SOL', 'mSOL', 'ETH', 'BTC')  AND outstanding_volume_raw < 1e7)
+    OR
+   
+    --  Other minor assets (non-mainstream assets)
+    --     - Allow net locked amount up to 0.1 billion (1e8) units
+    --     - Accommodate the naturally large unit quantities of small-cap or meme tokens
+    (symbol NOT IN ('USDC', 'SOL', 'mSOL', 'ETH', 'BTC') AND outstanding_volume_raw < 1e8)
+  
+  --  Global filtering: Net locked amount must be greater than 0.1 units
+  --     - Remove "dust" balances (extremely small holdings) to maintain accuracy
+AND outstanding_volume_raw > 0.1
 )
 --------------------------------------------------------------------------------
 -- 6. Borrow Outstanding Summary
+-- This section summarizes the Borrow_outstanding across all assets.
+-- Final output values are converted and presented in millions (M USD) for better readability.
 --------------------------------------------------------------------------------
 
 SELECT
-  'outstanding_volume_usd' AS metric,
-  SUM(outstanding_volume_usd) AS value
+  'borrow_outstanding_usd(M)' AS metric,
+  SUM(outstanding_volume_usd) / 1e6  AS value
 FROM outstanding_volume;
-
