@@ -5,7 +5,7 @@
 -- Note: This part takes a "user perspective", reflecting the actual asset outflow from MarginFi protocol
 --------------------------------------------------------------------------------
 WITH marginfi_borrows AS (
-  SELECT 
+  SELECT a.decoded_instruction,tx_id,
     DATE_TRUNC('hour',a.BLOCK_TIMESTAMP) as borrow_time,  -- Borrow time, used for hourly price matching
     a.decoded_instruction:"args":"amount"::FLOAT AS raw_amount,  -- Borrowed amount (not normalized by decimals)
     acc.value:"pubkey"::STRING AS account_address  -- Token ATA from which the user receives the loan (destinationTokenAccount)
@@ -16,6 +16,8 @@ WITH marginfi_borrows AS (
     AND acc.value:"name"::STRING = 'destinationTokenAccount'  -- Account name must be destinationTokenAccount
     -- destinationTokenAccount reflects the user's receiving account, capturing actual outflow from the protocol
 ),
+
+
 --------------------------------------------------------------------------------
 -- 2. Map Token Account to Mint for identifying token types
 -- Source: solana.core.fact_token_balances
@@ -51,11 +53,13 @@ asset_metadata AS (
     ezm.symbol,        -- Token symbol (used for inferring decimal precision if missing)
     COALESCE(
       ezm.decimals,  -- Prioritize the official decimals
-      -- If missing, try symbol-based inference
-      CASE 
+
+    -- If missing, infer decimals from symbol patterns: 
+    -- LP tokens generally share the same decimal precision as their native tokens (e.g., USDC-LP uses the same decimals as USDC)      CASE 
         WHEN LOWER(ezm.symbol) LIKE '%usd%' THEN 6  -- Stablecoins & LPs (e.g., LP-USDC, cUSDC): use 6 decimals
         WHEN LOWER(ezm.symbol) LIKE '%eth%' THEN 8  -- ETH-related tokens: use 8 decimals
         WHEN LOWER(ezm.symbol) LIKE '%sol' THEN 9   -- SOL-related tokens: use 9 decimals
+
         -- PumpFun tokens: default to 6
         WHEN LOWER(ezm.symbol) LIKE '%pump%' THEN 6 
         WHEN LOWER(ezm.token_address) LIKE '%pump' THEN 6
@@ -79,6 +83,9 @@ asset_metadata AS (
 --   Primary: solana.price.ez_prices_hourly
 --   Backup:  solana.price.fact_prices_ohlc_hourly (uses OHLC close)
 -- Strategy: match on token_address + hour; prefer primary price
+-- Explanation: Historical prices are used for Borrow Volume to reflect the actual borrowing cost at the time of the transaction. 
+--- This ensures that the calculation of Borrow Volume is consistent with the value agreed upon at the time of borrowing,
+--- rather than being affected by later price fluctuations.
 --------------------------------------------------------------------------------
 -- ① Primary price source (hourly granularity)
 -- Source: mainstream on-chain price table “ez_prices_hourly”
@@ -123,9 +130,12 @@ hp_final_prices AS (
 -- the hourly token price at the time of the borrow, then aggregate
 --------------------------------------------------------------------------------
 borrow_volume AS (
+SELECT * FROM(
   SELECT
     ti.mint,                     -- Token mint address
-    SUM(COALESCE(mb.raw_amount, 0)) AS borrow_volume_raw, 
+    am.symbol,
+    SUM(COALESCE(mb.raw_amount, 0)/POWER(10, COALESCE(am.decimals, 0))) AS borrow_volume_amount,
+ 
    -- Total borrow volume (USD) = Each borrow amount × corresponding hourly price, then aggregated
    SUM(
       (COALESCE(mb.raw_amount, 0) / POWER(10, COALESCE(am.decimals, 0)))  -- Convert raw token amount to standardized unit using its decimals
@@ -139,13 +149,36 @@ borrow_volume AS (
   LEFT JOIN hp_final_prices hp
     ON am.token_address = hp.token_address
     AND hp.hour = mb.borrow_time   --  Precisely match the hourly price corresponding to the borrow timestamp
-  GROUP BY ti.mint              -- Group and aggregate by token
+  GROUP BY ti.mint,am.symbol
+--,am.decimals              -- Group and aggregate by token
 )
+WHERE 
+  (
+    --  Mainstream assets (USDC, SOL, mSOL, ETH, BTC)
+    --     - Restrict net locked amount to less than 10 million (1e7) units
+    --     - Prevent abnormal large balances from distorting TVL calculations
+    (symbol IN ('USDC', 'SOL', 'mSOL', 'ETH', 'BTC') AND borrow_volume_amount < 1e7)
+    OR
+    --  Other minor assets (non-mainstream assets)
+    --     - Allow net locked amount up to 0.1 billion (1e8) units
+    --     - Accommodate the naturally large unit quantities of small-cap or meme tokens
+    (symbol NOT IN ('USDC', 'SOL', 'mSOL', 'ETH', 'BTC') AND borrow_volume_amount < 1e8)
+  )
+  --  Global filtering: Net locked amount must be greater than 0.1 units
+  --     - Remove "dust" balances (extremely small holdings) to maintain accuracy
+AND borrow_volume_amount > 0.1
+ 
+)
+
+
+
 --------------------------------------------------------------------------------
 -- 6. Borrow Volume Summary
+-- This section summarizes the Borrow_volume across all assets.
+-- Final output values are converted and presented in millions (M USD) for better readability.
 --------------------------------------------------------------------------------
 
 SELECT
-  'borrow_volume_usd' AS metric,
-  SUM(borrow_volume_usd) AS value 
+  'borrow_volume_usd(M)' AS metric,
+  SUM(borrow_volume_usd) / 1e6  AS value 
 FROM borrow_volume;
