@@ -2,7 +2,7 @@
 -- 1. Extract Deposit actions related to BankLiquidityVault for computing deposit volume
 -- Source: solana.core.fact_decoded_instructions
 -- Note: This query takes a "protocol-level" perspective. The 'bankLiquidityVault'
--- account reflects the protocol's asset inflow, which can be used to measure user deposits into MarginFi.
+--- account reflects the protocol's asset inflow, which can be used to measure user deposits into MarginFi.
 --------------------------------------------------------------------------------
 WITH deposit_actions AS (
   SELECT DISTINCT
@@ -53,14 +53,17 @@ asset_metadata AS (
     ezm.symbol,        -- Token symbol (used for inferring decimal precision if missing)
     COALESCE(
       ezm.decimals,  -- Prioritize the official decimals
-      -- If missing, try symbol-based inference
+    -- If missing, infer decimals from symbol patterns: 
+    -- LP tokens generally share the same decimal precision as their native tokens (e.g., USDC-LP uses the same decimals as USDC)
       CASE 
         WHEN LOWER(ezm.symbol) LIKE '%usd%' THEN 6  -- Stablecoins & LPs (e.g., LP-USDC, cUSDC): use 6 decimals
         WHEN LOWER(ezm.symbol) LIKE '%eth%' THEN 8  -- ETH-related tokens: use 8 decimals
         WHEN LOWER(ezm.symbol) LIKE '%sol' THEN 9   -- SOL-related tokens: use 9 decimals
+
         -- PumpFun tokens: default to 6
         WHEN LOWER(ezm.symbol) LIKE '%pump%' THEN 6 
         WHEN LOWER(ezm.token_address) LIKE '%pump' THEN 6
+
         -- Verified fallback decimals for known tokens
         WHEN ezm.token_address IN( 'ED5nyyWEzpPPiWimP8vYm7sD7TD3LAt3Q3gRTWHzPJBY' 
                                    ,'CTJf74cTo3cw8acFP1YXF3QpsQUUBGBjh2k2e8xsZ6UL'
@@ -81,6 +84,9 @@ asset_metadata AS (
 --   Primary: solana.price.ez_prices_hourly
 --   Backup:  solana.price.fact_prices_ohlc_hourly (uses OHLC close)
 -- Strategy: match on token_address + hour; prefer primary price
+-- Explanation: Borrow Volume is calculated using historical prices to reflect the actual borrowing cost 
+--- at the time of the transaction. This ensures that the total borrow volume accurately matches the value 
+--- agreed upon at the time of borrowing, without being affected by subsequent price fluctuations in the market.
 --------------------------------------------------------------------------------
 -- ① Primary price source (hourly granularity)
 -- Source: mainstream on-chain price table “ez_prices_hourly”
@@ -124,13 +130,19 @@ hp_final_prices AS (
 -- the hourly token price at the time of the deposit, then aggregate
 --------------------------------------------------------------------------------
 deposit_volume AS (
+SELECT * FROM (
   SELECT
     ti.mint,
     am.symbol,
-    SUM(COALESCE(da.deposit_raw_amount, 0)) AS deposit_raw_amount, 
+
+    -- Outstanding amount (normalized by decimals), calculated as: borrow - repay - liquidate    
+    SUM(COALESCE(da.deposit_raw_amount, 0)/POWER(10, COALESCE(am.decimals, 0))) AS deposit_raw_amount, 
+
    -- Total deposit volume (USD) = Each deposit amount × corresponding hourly price, then aggregated
    SUM(
-      (COALESCE(da.deposit_raw_amount, 0) / POWER(10, COALESCE(am.decimals, 0))) -- Convert raw token amount to standardized unit using its decimals
+
+   -- Convert raw token amount to standardized unit using its decimals
+      (COALESCE(da.deposit_raw_amount, 0) / POWER(10, COALESCE(am.decimals, 0))) 
       * COALESCE(hp.price, 0)     -- Use the corresponding hourly price; fallback to 0 if the price is missing
     ) AS deposit_volume_usd
   FROM deposit_actions da
@@ -141,11 +153,29 @@ deposit_volume AS (
     AND hp.hour = DATE_TRUNC('hour', da.BLOCK_TIMESTAMP) -- Precisely match the hourly price corresponding to the borrow timestamp
   GROUP BY ti.mint, am.symbol
 )
+WHERE 
+  (
+    --  Mainstream assets (USDC, SOL, mSOL, ETH, BTC)
+    --     - Restrict net locked amount to less than 10 million (1e7) units
+    --     - Prevent abnormal large balances from distorting TVL calculations
+    (symbol IN ('USDC', 'SOL', 'mSOL', 'ETH', 'BTC') AND deposit_raw_amount < 1e7)
+    OR
+    --  Other minor assets (non-mainstream assets)
+    --     - Allow net locked amount up to 0.1 billion (1e8) units
+    --     - Accommodate the naturally large unit quantities of small-cap or meme tokens
+    (symbol NOT IN ('USDC', 'SOL', 'mSOL', 'ETH', 'BTC') AND deposit_raw_amount < 1e8)
+  )
+  --  Global filtering: Net locked amount must be greater than 0.1 units
+  --     - Remove "dust" balances (extremely small holdings) to maintain accuracy
+AND deposit_raw_amount > 0.1
+)
 --------------------------------------------------------------------------------
 -- 6. Deposit Volume Summary
+-- This section summarizes the Deposit_volume across all assets.
+-- Final output values are converted and presented in millions (M USD) for better readability.
 --------------------------------------------------------------------------------
 
 SELECT
-  'deposit_volume_usd' AS metric,
-  SUM(deposit_volume_usd) AS value 
+  'deposit_volume_usd(M)' AS metric,
+  SUM(deposit_volume_usd) / 1e6  AS value 
 FROM deposit_volume;
