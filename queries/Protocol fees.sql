@@ -50,6 +50,9 @@ vault_owners AS (
 --       b) The vault owner is the recipient of the transfer.
 --       c) The amount is greater than 0 (ensures only real transfers are considered).
 -- This ensures that only genuine protocol-level inflows triggered by fee collection logic are captured.
+-- Explanation: Historical prices are used for Protocol Fees to reflect the actual value at the time of the transaction.
+-- This ensures that the calculation of fees and revenue is consistent with the value agreed upon during the transaction,
+-- rather than being influenced by later market fluctuations.
 --------------------------------------------------------------------------------
 transfer_actions AS (
   SELECT  
@@ -97,7 +100,7 @@ hp_final_prices AS (
    AND mp.hour = bp.hour                    -- join on “hour” as the primary key
 ),
 --------------------------------------------------------------------------------
--- 5. Calculate Protocol Fees in USD
+-- 4. Calculate Protocol Fees in USD
 -- Join token transfers with matched prices to compute fee value in USD
 -- Assumes token amounts are already human-readable (optional: normalize using decimals)
 --------------------------------------------------------------------------------
@@ -116,11 +119,12 @@ final_protocol_fees AS (
     AND hp.hour = DATE_TRUNC('hour', ta.transfer_time) -- Match token price based on the exact hour of the transfer
 )
 --------------------------------------------------------------------------------
--- 6. Protocol_fees_usd Summary
+-- 5. Protocol_fees_usd Summary
+-- This section summarizes the Protocol_fees across all assets.
+-- Final output values are converted and presented in millions (M USD) for better readability.
 --------------------------------------------------------------------------------
 
 SELECT
-  'protocol_fees_usd' AS metric,
-  SUM(protocol_fees_usd) AS value 
+  'protocol_fees_usd(M)' AS metric,
+  SUM(protocol_fees_usd)/1e6 AS value 
 FROM final_protocol_fees;
-
