@@ -16,6 +16,7 @@ WITH deposit_actions AS (
     AND acc.value:"name"::STRING = 'bankLiquidityVault'
     -- From protocol perspective, bankLiquidityVault represents the core account for asset inflow/outflow.
     -- It is used to measure deposit activity at the protocol level.
+    -- AND a.BLOCK_TIMESTAMP >= CURRENT_DATE - INTERVAL '30 days' -- Only keep data from the last 30 days
 ),
 --------------------------------------------------------------------------------
 -- 2. Extract Withdraw operations related to BankLiquidityVault for Deposit Outstanding calculation
@@ -70,14 +71,18 @@ asset_metadata AS (
     ezm.symbol,        -- Token symbol (used for inferring decimal precision if missing)
     COALESCE(
       ezm.decimals,  -- Prioritize the official decimals
-      -- If missing, try symbol-based inference
+
+    -- If missing, infer decimals from symbol patterns: 
+    -- LP tokens generally share the same decimal precision as their native tokens (e.g., USDC-LP uses the same decimals as USDC)
       CASE 
         WHEN LOWER(ezm.symbol) LIKE '%usd%' THEN 6  -- Stablecoins & LPs (e.g., LP-USDC, cUSDC): use 6 decimals
         WHEN LOWER(ezm.symbol) LIKE '%eth%' THEN 8  -- ETH-related tokens: use 8 decimals
         WHEN LOWER(ezm.symbol) LIKE '%sol' THEN 9   -- SOL-related tokens: use 9 decimals
+
         -- PumpFun tokens: default to 6
         WHEN LOWER(ezm.symbol) LIKE '%pump%' THEN 6 
         WHEN LOWER(ezm.token_address) LIKE '%pump' THEN 6
+
         -- Verified fallback decimals for known tokens
         WHEN ezm.token_address IN( 'ED5nyyWEzpPPiWimP8vYm7sD7TD3LAt3Q3gRTWHzPJBY' 
                                    ,'CTJf74cTo3cw8acFP1YXF3QpsQUUBGBjh2k2e8xsZ6UL'
@@ -93,11 +98,14 @@ asset_metadata AS (
 ),
 
 --------------------------------------------------------------------------------
--- 5. Retrieve latest price for each token (used in Borrow Outstanding calculation)
+-- 5. Retrieve latest price for each token (used in Deposit Outstanding calculation)
 -- Only the latest hour’s price is needed, not historical hourly prices
 -- Priority:
 --   - Primary: ez_prices_hourly
 --   - Fallback: fact_prices_ohlc_hourly (close)
+-- Explanation: The latest price is used for Deposit Outstanding to reflect the current market value of assets that are still locked in the protocol. 
+--- Since Deposit Outstanding represents the current amount of funds that users have deposited but not yet withdrawn, 
+--- it is essential to use the most up-to-date price to ensure that the calculation accurately reflects the current value of those assets.
 --------------------------------------------------------------------------------
 -- ① Primary price source (Only fetch the most recent hour’s data for each token)
 -- Source: mainstream on-chain price table “ez_prices_hourly”
@@ -106,8 +114,8 @@ lp_main_prices AS (
     token_address,     
     price              
   FROM solana.price.ez_prices_hourly
-  WHERE blockchain = 'solana'
-    AND hour = (  -- Only select the most recent hour
+  WHERE blockchain = 'solana' 
+  AND hour = (  -- Only select the most recent hour
       SELECT MAX(hour) 
       FROM solana.price.ez_prices_hourly 
     )
@@ -117,17 +125,18 @@ lp_main_prices AS (
 -- Source: “close” field from “fact_prices_ohlc_hourly” table
 -- Used as a fallback when the main price source is missing
 lp_backup_prices AS (
-  SELECT 
-    dm.token_address,  
-    f.close AS price   -- Fallback price: use OHLC close as hourly consensus price
-  FROM solana.price.fact_prices_ohlc_hourly f
-  INNER JOIN solana.price.dim_asset_metadata dm 
-    ON f.asset_id = dm.asset_id
-  WHERE dm.blockchain = 'solana'
-    AND f.hour = (  -- Same as above: fetch only the most recent hourly data
-      SELECT MAX(hour) 
-      FROM solana.price.fact_prices_ohlc_hourly
-    )
+  SELECT *
+  FROM (
+    SELECT 
+      dm.token_address,
+      f.close AS price,
+      ROW_NUMBER() OVER (PARTITION BY dm.token_address ORDER BY f.hour DESC) AS rn
+    FROM solana.price.fact_prices_ohlc_hourly f
+    INNER JOIN solana.price.dim_asset_metadata dm 
+      ON f.asset_id = dm.asset_id
+    WHERE dm.blockchain = 'solana'
+  ) t
+  WHERE rn = 1
 ),
 
 -- ③ Merge primary and backup price sources
@@ -146,13 +155,16 @@ lp_final_prices AS (
 -- Logic: Outstanding = Deposit - withdraw, then multiply by latest token price
 --------------------------------------------------------------------------------
 outstanding_volume AS (
+SELECT * FROM(
   SELECT
     ti.mint,
     am.symbol,
-    -- Raw outstanding amount (not normalized by decimals), calculated as: deposit - withdraw    
+
+    -- Outstanding amount (normalized by decimals), calculated as: deposit - withdraw    
     SUM(
-      COALESCE(da.deposit_raw_amount, 0) - COALESCE(wa.withdraw_raw_amount, 0)
+      (COALESCE(da.deposit_raw_amount, 0) - COALESCE(wa.withdraw_raw_amount, 0))/ POWER(10, am.decimals)
     ) AS outstanding_volume_raw,
+
     -- Outstanding deposit amount in USD = normalized token amount × latest price
     SUM(
       (
@@ -167,12 +179,31 @@ outstanding_volume AS (
   LEFT JOIN withdraw_actions wa ON am.token_address = wa.withdraw_token_address -- Join withdrawals by token address
   GROUP BY ti.mint, am.symbol
 )
+WHERE 
+  (
+    --  Mainstream assets (USDC, SOL, mSOL, ETH, BTC)
+    --     - Restrict net locked amount to less than 10 million (1e7) units
+    --     - Prevent abnormal large balances from distorting TVL calculations
+    (symbol IN ('usdc', 'sol', 'msol', 'eth', 'btc') AND outstanding_volume_raw < 1e7)
+    OR
+    --  Other minor assets (non-mainstream assets)
+    --     - Allow net locked amount up to 0.1 billion (1e8) units
+    --     - Accommodate the naturally large unit quantities of small-cap or meme tokens
+    (symbol NOT IN ('usdc', 'sol', 'msol', 'eth', 'btc') AND outstanding_volume_raw < 1e8)
+  
+  --  Global filtering: Net locked amount must be greater than 0.1 units
+  --     - Remove "dust" balances (extremely small holdings) to maintain accuracy
+AND outstanding_volume_raw > 0.1
+)
+)
 
 --------------------------------------------------------------------------------
 -- 7. Deposit outstanding Summary
+-- This section summarizes the Deposit_volume across all assets.
+-- Final output values are converted and presented in millions (M USD) for better readability.
 --------------------------------------------------------------------------------
 
 SELECT
-  'outstanding_volume_usd' AS metric,
-  SUM(outstanding_volume_usd) AS value 
+  'deposit_outstanding_usd(M)' AS metric,
+  SUM(outstanding_volume_usd)/1e6  AS value 
 FROM outstanding_volume;
