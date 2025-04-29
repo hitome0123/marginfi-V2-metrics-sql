@@ -6,8 +6,8 @@
 --   - This query identifies the token accounts used by MarginFi to collect fees.
 --   - Specifically filters instructions with event_type = 'lendingPoolCollectBankFees'.
 --   - Uses LATERAL FLATTEN to expand account arrays and extract specific vault addresses:
---       • 'feeVault': where protocol fees are sent
---       • 'insuranceVault': where liquidation revenue is accumulated
+--        'feeVault': where protocol fees are sent
+--        'insuranceVault': where liquidation revenue is accumulated
 --   - Applies MAX(CASE ...) as an aggregation trick to extract a single matching value
 --     for each tx_id. This avoids duplication and ensures reliable joins downstream.
 --------------------------------------------------------------------------------
@@ -94,6 +94,9 @@ transfer_actions AS (
 --   Primary: solana.price.ez_prices_hourly
 --   Backup:  solana.price.fact_prices_ohlc_hourly (uses OHLC close)
 -- Strategy: match on token_address + hour; prefer primary price
+-- Explanation: Historical prices are used for Revenue to reflect the actual value at the time of the transaction.
+-- This ensures that the calculation of fees and revenue is consistent with the value agreed upon during the transaction,
+-- rather than being influenced by later market fluctuations.
 --------------------------------------------------------------------------------
 -- ① Primary price source (hourly granularity)
 -- Source: mainstream on-chain price table “ez_prices_hourly”
@@ -141,6 +144,7 @@ hp_final_prices AS (
 --   - Join token transfers with the corresponding hourly price based on transfer time
 --   - Multiply token amount by hourly price to convert to USD
 --   - Filter only relevant revenue types: 'Protocol Fees' and 'Liquidation Revenue'
+--   - This logic is determined based on the MarginFi protocol documentation.
 --------------------------------------------------------------------------------
 Revenue_volume AS (
 SELECT 
@@ -160,11 +164,12 @@ ORDER BY ta.transfer_time DESC  -- Sort results by most recent revenue events
 )   
 --------------------------------------------------------------------------------
 -- 6. Revenue Volume Summary
+-- This section summarizes the Revenue across all assets.
+-- Final output values are converted and presented in millions (M USD) for better readability.
 --------------------------------------------------------------------------------
 
 SELECT
-  'revenue_amount_usd' AS metric,
-  SUM(revenue_amount_usd) AS value 
+  'revenue_amount_usd(M)' AS metric,
+  SUM(revenue_amount_usd)/  1e6  AS value 
 FROM Revenue_volume;
-
 
